@@ -1,0 +1,228 @@
+package ch.fhnw.i4ds.campartex.util;
+
+import java.awt.Color;
+import java.awt.Graphics;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
+import java.awt.image.BufferedImage;
+import java.awt.image.ColorModel;
+import java.awt.image.WritableRaster;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.util.List;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+import javax.imageio.ImageIO;
+
+import ch.fhnw.i4ds.campartex.model.TextureAtlasImage;
+import ch.fhnw.i4ds.campartex.model.Thumbnail;
+import ch.fhnw.i4ds.campartex.model.retrieving.ThumbnailX16RetrievalImage;
+import ch.fhnw.i4ds.campartex.model.retrieving.ThumbnailX256RetrievalImage;
+import ch.fhnw.i4ds.campartex.service.ImageService;
+
+public class ImageUtils {
+    
+    private static final Logger logger = Logger.getLogger("ImageUtils");
+    
+    private static final String CAMPARTEX_HOME = "CAMPARTEX_HOME";
+
+    public static BufferedImage scaleImage(String urlString, int height, int width) throws IOException {
+        BufferedImage img = ImageIO.read(new URL(urlString));
+        if(height==-1||width==-1) return img;
+        else {
+            BufferedImage scaledImage = new BufferedImage(width, height, img.getType());
+            Graphics2D graphics2D = scaledImage.createGraphics();
+            graphics2D.setRenderingHint(RenderingHints.KEY_INTERPOLATION,
+                    RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+            graphics2D.drawImage(img, 0, 0, width, height, null);
+            graphics2D.dispose();
+            return scaledImage;
+        }
+    }
+    
+    public static BufferedImage scaleImage(BufferedImage image, int sideLength) {
+        BufferedImage scaledImage = new BufferedImage(sideLength, sideLength, image.getType());
+        Graphics2D g2 = scaledImage.createGraphics();
+        g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION,
+                RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+        g2.drawImage(image, 0, 0, sideLength, sideLength, null);
+        g2.dispose();
+        return scaledImage;
+    }
+    
+    public static BufferedImage scaleImage(String urlString, int sideLength) throws IOException {
+        BufferedImage img = ImageIO.read(new URL(urlString));
+        return scaleImage(img, sideLength);
+    }
+    
+    public static byte[] getScaledByteArrayFromImage(String urlString, int height, int width) throws IOException {
+        BufferedImage bufferedImage = scaleImage(urlString, height, width);
+        ByteArrayOutputStream bao = new ByteArrayOutputStream();
+        ImageIO.write(bufferedImage, MimeUtils.getExtension(urlString), bao);
+        return bao.toByteArray();
+    }
+    
+    
+    public static byte[] getScaledByteArrayFromImage(String urlString, int sideLength) throws IOException {
+        BufferedImage bufferedImage = scaleImage(urlString, sideLength);
+        ByteArrayOutputStream bao = new ByteArrayOutputStream();
+        ImageIO.write(bufferedImage, MimeUtils.getExtension(urlString), bao);
+        return bao.toByteArray();
+    }
+    
+    public static byte[] getByteArrayFromImage(String urlString) throws MalformedURLException, IOException {
+        ByteArrayOutputStream bao = new ByteArrayOutputStream();
+        BufferedImage bufferedImage = ImageIO.read(new URL(urlString));
+        String extension = MimeUtils.getExtension(urlString);
+        ImageIO.write(bufferedImage, extension, bao);
+        return bao.toByteArray();
+    }
+    
+    public static BufferedImage getImageFromByteArray(byte[] imgData) throws IOException {
+        InputStream in = new ByteArrayInputStream(imgData);
+        return ImageIO.read(in);
+    }
+    
+    public static byte[] getScaledByteArrayFromImage(BufferedImage image, int sideLength, String extension) throws IOException {
+        BufferedImage bufferedImage = scaleImage(image, sideLength);
+        ByteArrayOutputStream bao = new ByteArrayOutputStream();
+        ImageIO.write(bufferedImage, extension, bao);
+        return bao.toByteArray();
+    }
+    
+    public static void saveImageToFile(BufferedImage image, String extension, String path) throws IOException {
+        ImageIO.write(image, extension, new File(path + "." + extension));
+    }
+    
+    /**
+     * creates a {@link java.awt.image.BufferedImage BufferedImage} out of a String urlPath
+     * 
+     * @param urlPath
+     *            path of image URL string
+     * @return {@link java.awt.image.BufferedImage BufferedImage} of image
+     * @throws MalformedURLException
+     * @throws IOException
+     * @throws InterruptedException 
+     */
+    public static BufferedImage createImage(String urlPath) throws MalformedURLException, IOException, InterruptedException {
+        return createImage(new URL(urlPath));
+    }
+    
+    /**
+     * creates a {@link java.awt.image.BufferedImage BufferedImage} of URL content
+     * @param url image to create
+     * @return {@link java.awt.image.BufferedImage BufferedImage} bufferedImage
+     * @throws MalformedURLException
+     * @throws IOException
+     * @throws InterruptedException
+     */
+    public static BufferedImage createImage(URL url) throws MalformedURLException, IOException, InterruptedException {
+        BufferedImage image = null;
+        try {
+            image = ImageIO.read(url);
+        } catch(Exception e) {
+            //TODO delete this part if no more images over HTTP are stored
+            logger.log(Level.WARNING, "Could not create image, waiting one second and try again: " + e);
+            Thread.sleep(1000); // needed because of denial of service from soleil server
+            image = ImageIO.read(url);
+        }
+        return image;
+    }
+
+    /**
+     * Get the CAMPARTEX_HOME dir either from System.properties or System environment
+     * @return absolute path to CAMPARTEX_HOME
+     */
+    public static String getCampartexHome() {
+        File euclidHome = getCampartexHomeDir();
+        return euclidHome.getAbsolutePath();
+    }
+
+    /**
+     * Get the CAMPARTEX_HOME dir either from System.properties or System environment
+     * @return the CAMPARTEX_HOME
+     */
+    public static File getCampartexHomeDir() {
+        String campartexHome = System.getProperty(CAMPARTEX_HOME);
+        if (campartexHome == null) {
+            campartexHome = System.getenv(CAMPARTEX_HOME);
+        }
+
+        if (campartexHome == null) {
+            throw new IllegalArgumentException("Variable " + CAMPARTEX_HOME + " must be defined");
+        }
+
+        File campartexHomeDir = new File(campartexHome);
+        if (!campartexHomeDir.exists()) {
+            throw new IllegalArgumentException("Directory referenced by environment variable '" + CAMPARTEX_HOME
+                    + "' does not exist: " + campartexHomeDir.getAbsolutePath());
+        }
+
+        if (!campartexHomeDir.isDirectory()) {
+            throw new IllegalArgumentException("'" + CAMPARTEX_HOME + "' is not a directory: " + campartexHomeDir.getAbsolutePath());
+        }
+        return campartexHomeDir;
+    }
+    
+    public static void createTextureAtlas(List<TextureAtlasImage> imageList, ImageService imageService) throws IOException {
+        int imageSize = 256, //(int) Math.sqrt(imageList.size()),
+            imageWidth = 4096; //imageSize * 16;
+        
+        //get the first of the list and use it as a background image.
+        String templateUrl = imageService.getURLImageById(imageList.get(0).getId()).getUrl();
+        BufferedImage bufferedImageTemplate = scaleImage(templateUrl, imageWidth);
+        String extension = MimeUtils.getExtension(templateUrl);
+        
+        bufferedImageTemplate.getGraphics().setColor(Color.white);
+        bufferedImageTemplate.getGraphics().fillRect(0, 0, imageWidth, imageWidth);
+        
+        BufferedImage newImg = cloneBufferedImage(bufferedImageTemplate);
+        Graphics g = newImg.getGraphics();
+        
+        int count = 0, x = 0, y = 0;
+        BufferedImage buffImage = null;
+        logger.log(Level.INFO, "start writing tiles on textureAtlas");
+        for (TextureAtlasImage pImg : imageList) {
+            
+            y = count / imageSize;
+            x = count % imageSize;
+            
+            Thumbnail thumbnailX16;
+
+            //try to load the 16px image from db
+            ThumbnailX16RetrievalImage lowresImage = imageService.getEntityById(pImg.getId(), ThumbnailX16RetrievalImage.class);
+            if (lowresImage != null && lowresImage.getThumbnail() != null) {
+                thumbnailX16 = lowresImage.getThumbnail();
+            } else {
+              //if that didn't work, load the 256px and scale it down
+                ThumbnailX256RetrievalImage highresImage = imageService.getEntityById(pImg.getId(), ThumbnailX256RetrievalImage.class);
+                Thumbnail thumbnailX256 = highresImage.getThumbnail();
+                buffImage = ImageUtils.scaleImage(ImageUtils.getImageFromByteArray(thumbnailX256.getData()), 16);
+                thumbnailX16 = new Thumbnail(Power2ImageSize.x16, buffImage, thumbnailX256.getExtension());
+            }
+            
+            
+            // draw 16px image on texture atlas
+            BufferedImage img = thumbnailX16.getBufferedImage();
+            g.drawImage(img, x * 16, y * 16, null);
+            
+            count++;
+        }
+        
+        saveImageToFile(newImg, extension, ImageUtils.getCampartexHome() + "/textureAtlas");
+    }
+    
+    static BufferedImage cloneBufferedImage(BufferedImage bi) {
+        ColorModel cm = bi.getColorModel();
+        boolean isAlphaPremultiplied = cm.isAlphaPremultiplied();
+        WritableRaster raster = bi.copyData(null);
+        return new BufferedImage(cm, raster, isAlphaPremultiplied, null);
+    }
+    
+}

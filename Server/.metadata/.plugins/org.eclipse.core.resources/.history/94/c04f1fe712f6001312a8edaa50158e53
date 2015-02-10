@@ -1,0 +1,299 @@
+package ch.fhnw.i4ds.campartex.controller;
+
+import static org.springframework.data.mongodb.core.query.Criteria.where;
+
+import java.awt.image.BufferedImage;
+import java.io.IOException;
+import java.net.MalformedURLException;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+import net.semanticmetadata.lire.DocumentBuilder;
+import net.semanticmetadata.lire.DocumentBuilderFactory;
+import net.semanticmetadata.lire.ImageSearchHits;
+import net.semanticmetadata.lire.imageanalysis.CEDD;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.stereotype.Controller;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.ResponseBody;
+
+import ch.fhnw.i4ds.campartex.component.DBImageCreator;
+import ch.fhnw.i4ds.campartex.component.LIReComponent;
+import ch.fhnw.i4ds.campartex.component.analysis.HistogramPerDigit;
+import ch.fhnw.i4ds.campartex.model.ModelParser;
+import ch.fhnw.i4ds.campartex.model.URLImage;
+import ch.fhnw.i4ds.campartex.service.DBService;
+import ch.fhnw.i4ds.campartex.service.ImageService;
+import ch.fhnw.i4ds.campartex.util.ClusteringMethod;
+import ch.fhnw.i4ds.campartex.util.ImageUtils;
+
+/**
+ * AdminController handles web requests for handling and administering images
+ * 
+ * @author schorta_m
+ */
+@Controller
+@RequestMapping("/indexing")
+public class IndexController {
+
+    private static final Logger logger = Logger.getLogger("IndexController");
+    private static final int MAX_THREADS = 10; // if you want that higher than 10 you have to increase Mongo's "connectionsPerHost" which defaults to 10. Otherwise you'll have errors alike https://groups.google.com/forum/#!topic/mongodb-user/xzw0Cb831VY
+
+    @Autowired
+    private ImageService imageService;
+
+    @Autowired
+    private DBImageCreator rgbImageCreator;
+
+    @Autowired
+    private LIReComponent lireService;
+
+    @Autowired
+    private DBService dbService;
+
+    /**
+     * only for testing purposes - returns a simple string example: http://host:8080/campartex/services/admin/hello
+     * 
+     * @return simple string
+     */
+    @ResponseBody
+    @RequestMapping(value = "/hello", method = RequestMethod.GET, produces = "text/plain")
+    public String hello() {
+        return "Hello World";
+    }
+
+    /**
+     * drops index and creates a new CEDD index for all images example: http://host:8080/campartex/services/admin/index
+     * 
+     * @return string of result of indexing
+     */
+    @Deprecated
+    @ResponseBody
+    @RequestMapping(value = "/ceddindex", method = RequestMethod.GET, produces = "application/json")
+    public String ceddindex() {
+        try {
+            Set<DocumentBuilder> documentBuilder = new HashSet<DocumentBuilder>();
+            documentBuilder.add(DocumentBuilderFactory.getCEDDDocumentBuilder());
+            List<URLImage> images = imageService.getAllImages(URLImage.class);
+            lireService.createAndRunIndexer(images, documentBuilder, 10);
+            return "Created CEDD index of all images in db. ";
+        } catch (Exception e) {
+            logger.log(Level.SEVERE, "failed: " + e);
+            return "Could not index images: " + e;
+        }
+    }
+    
+
+    /**
+     * drops index and creates a new CEDD index for all images, directly into DB, example: http://host:8080/campartex/services/admin/index
+     * 
+     * @return string of result of indexing
+     */
+    @ResponseBody
+    @RequestMapping(value = "/ceddindexdirect", method = RequestMethod.GET, produces = "application/json")
+    public String ceddindexdirect(@RequestParam(value = "removeErrorImages", required = false) final Boolean removeErrorImages) {
+        try {
+            
+            logger.log(Level.INFO, "Getting all URLImages without cedd features first");
+            // About the performance of this query: http://stackoverflow.com/questions/22635959/mongodb-query-exceptionally-slow
+            Query imagesWithoutCeddFeature = new Query();
+            imagesWithoutCeddFeature.addCriteria(where(ModelParser.FEATURE_DATA_CEDD).exists(false));
+            List<URLImage> allImages = imageService.getAllFilteredImages(URLImage.class, imagesWithoutCeddFeature);
+            logger.log(Level.INFO, "All images without cedd features loaded. Amount: " + allImages.size());
+            
+            class CeddExtractionRunnable implements Runnable {
+                private URLImage urlImage;
+                private int count;
+
+                public CeddExtractionRunnable(URLImage urlImage, int count) {
+                    this.urlImage = urlImage;
+                    this.count = count;
+                }
+
+                public void run() {
+                    try {
+                        BufferedImage bufferedImage = ImageUtils.createImage(this.urlImage.getUrl());
+                        CEDD cedd = new CEDD();
+                        cedd.extract(bufferedImage);
+                        logger.log(Level.INFO, "extracted image into CEDD");
+                        imageService.addFeatureData(this.urlImage.getId(), ClusteringMethod.cedd, cedd.getDoubleHistogram());
+                        bufferedImage = null;
+                        cedd = null;
+                        logProgress(count);
+                    } catch (Exception e) {
+                        // if image doesn't exist anymore (URL)
+                        logger.log(Level.SEVERE, "could not retrieve CEDD from image " + urlImage + ", " + e.toString() + ", " + e.getStackTrace()[0].toString());
+                        
+                        if (removeErrorImages) {
+                            imageService.deleteImage(this.urlImage);
+                        }
+                    }
+                }
+            }
+
+            ExecutorService executor = Executors.newFixedThreadPool(MAX_THREADS);
+            logger.log(Level.INFO, "Pool created");
+            int feedbackCount = 0;
+            for (URLImage urlImage : allImages) {
+                Runnable r = new CeddExtractionRunnable(urlImage, feedbackCount);
+                executor.execute(r);
+                feedbackCount++;
+                logger.log(Level.INFO, "executing ceddretrieval nr " + feedbackCount);
+            }
+            executor.shutdown();
+            while (!executor.isTerminated()) { }
+            
+            return "Created CEDD index of all images in db. ";
+        } catch (Exception e) {
+            logger.log(Level.SEVERE, "failed: " + e);
+            return "Could not index images: " + e;
+        }
+    }
+    
+    private void logProgress(int count) {
+        if (count % 1000 == 0)
+            logger.log(Level.INFO, "Creating image feature " + count);
+    }
+
+    /**
+     * drops index and creates a new index for all images in database
+     * 
+     * @return string of result of indexing
+     */
+    @ResponseBody
+    @RequestMapping(value = "/surfindex", method = RequestMethod.GET, produces = "application/json")
+    public String surfindex() {
+        try {
+            logger.log(Level.INFO, "starting surfindexing... ");
+            Collection<URLImage> images = imageService.getAllImages(URLImage.class);
+            lireService.createSURFIndex(images);
+            logger.log(Level.INFO, "surfindexing was sucessful... ");
+            return "Created index of all images in db. ";
+        } catch (Exception e) {
+            logger.log(Level.SEVERE, "failed: " + e);
+            for (StackTraceElement element : e.getStackTrace()) {
+                logger.log(Level.SEVERE, " " + element);
+            }
+            return "Could not index images: " + e;
+        }
+    }
+    
+    @ResponseBody
+    @RequestMapping(value = "/surfhistogram", method = RequestMethod.GET, produces = "application/json")
+    public String surfhistogram() {
+        try {
+            logger.log(Level.INFO, "starting surfhistogramming... ");
+            lireService.createSurfHistogram();
+            logger.log(Level.INFO, "surfhistogramming was sucessful... ");
+            return "Created histogram of all images in indexfile. ";
+        } catch (Exception e) {
+            logger.log(Level.SEVERE, "failed: " + e);
+            for (StackTraceElement element : e.getStackTrace()) {
+                logger.log(Level.SEVERE, " " + element);
+            }
+            return "Could not histogram images: " + e;
+        }
+    }
+    
+    @ResponseBody
+    @RequestMapping(value = "/surfhistogrammissing", method = RequestMethod.GET, produces = "application/json")
+    public String surfhistogrammissing() {
+        try {
+            logger.log(Level.INFO, "starting surfhistogramming for missing images... ");
+            lireService.createSurfHistogramMissing();
+            logger.log(Level.INFO, "surfhistogramming was sucessful... ");
+            return "Created histogram of all images in indexfile. ";
+        } catch (Exception e) {
+            logger.log(Level.SEVERE, "failed: " + e);
+            for (StackTraceElement element : e.getStackTrace()) {
+                logger.log(Level.SEVERE, " " + element);
+            }
+            return "Could not histogram images: " + e;
+        }
+    }
+
+    /**
+     * creates a histogram and returns array
+     * 
+     * @return histogram integer[][] array
+     * @throws InstantiationException
+     * @throws IllegalAccessException
+     * @throws IOException
+     */
+    @ResponseBody
+    @RequestMapping(value = "/ceddHistograms", method = RequestMethod.GET)
+    public int[][] ceddHistograms() throws InstantiationException, IllegalAccessException, IOException {
+        logger.log(Level.INFO, "creating matrix... ");
+        double[][] matrix = lireService.getFeatureMatrix(ClusteringMethod.cedd);
+        if (matrix == null)
+            throw new NullPointerException("Feature Matrix is null, index images first. ");
+        logger.log(Level.INFO, "creating histograms... ");
+        HistogramPerDigit histogramPerDigit = new HistogramPerDigit(matrix);
+        return histogramPerDigit.getHistograms();
+    }
+    
+    /**
+     * creates a histogram and returns array
+     * 
+     * @return histogram integer[][] array
+     * @throws InstantiationException
+     * @throws IllegalAccessException
+     * @throws IOException
+     */
+    @ResponseBody
+    @RequestMapping(value = "/surfHistograms", method = RequestMethod.GET)
+    public int[][] surfHistograms() throws InstantiationException, IllegalAccessException, IOException {
+        logger.log(Level.INFO, "creating matrix... ");
+        double[][] matrix = lireService.getFeatureMatrix(ClusteringMethod.surf);
+        if (matrix == null)
+            throw new NullPointerException("Feature Matrix is null, index images first. ");
+        logger.log(Level.INFO, "creating histograms... ");
+        HistogramPerDigit histogramPerDigit = new HistogramPerDigit(matrix);
+        return histogramPerDigit.getHistograms();
+    }
+    
+    /**
+     * searches similar images of a template image by using the {@link net.semanticmetadata.lire.imageanalysis.CEDD
+     * CEDD} image retrieval feature example: http://host:8080/campartex/services/admin/searchcedd/20/?imageurl=http
+     * ://soleil.i4ds.ch/solarradio/qkl/2011/09/14/BIRO_20110914_152905_59.fit.gz.png
+     * 
+     * @param nrOfSimilarImages
+     *            number of similar images to return
+     * @param url
+     *            URL of image to compare other images to
+     * @return string of hits
+     * @throws InterruptedException 
+     * @throws IOException 
+     * @throws MalformedURLException 
+     */
+    @ResponseBody
+    @RequestMapping(value = "/searchcedd/{nrOfSimilarImages}/", method = RequestMethod.GET, produces = "application/json")
+    public String searchCedd(@PathVariable int nrOfSimilarImages, @RequestParam("imageurl") String url) throws MalformedURLException, IOException, InterruptedException {
+        logger.log(Level.INFO, "starting search...");
+        BufferedImage image = ImageUtils.createImage(url);
+        ImageSearchHits hits = lireService.getCEDDHits(image, nrOfSimilarImages);
+        if(hits==null) return null;
+        return hits.toString();
+    }
+    
+    @ResponseBody
+    @RequestMapping(value = "/searchsurf/{nrOfSimilarImages}/", method = RequestMethod.GET, produces = "application/json")
+    public String searchSURF(@PathVariable int nrOfSimilarImages, @RequestParam("imageurl") String url) throws IOException {
+        logger.log(Level.INFO, "starting search...");
+        URLImage image = imageService.getEntityByUrl(url, URLImage.class);
+        ImageSearchHits hits = lireService.getSURFHits(image.getId(), nrOfSimilarImages);
+        if(hits==null) return null;
+        return hits.toString();
+    }
+}

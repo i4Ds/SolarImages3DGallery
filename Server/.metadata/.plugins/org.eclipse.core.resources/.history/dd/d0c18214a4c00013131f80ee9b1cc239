@@ -1,0 +1,61 @@
+package ch.fhnw.i4ds.campartex.controller.helper;
+
+import static org.springframework.data.mongodb.core.query.Criteria.where;
+
+import java.io.IOException;
+import java.util.List;
+import java.util.Map;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+import javax.servlet.http.HttpSession;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.stereotype.Component;
+
+import ch.fhnw.i4ds.campartex.component.LIReComponent;
+import ch.fhnw.i4ds.campartex.model.ModelParser;
+import ch.fhnw.i4ds.campartex.model.retrieving.PositionRetrievalImage;
+import ch.fhnw.i4ds.campartex.service.ImageService;
+import ch.fhnw.i4ds.campartex.util.ClusteringMethod;
+import ch.fhnw.i4ds.campartex.util.ParameterParser;
+
+@Component("filteredSearchRequestHelper")
+public class FilteredSearchRequestHelper {
+
+    private static final Logger logger = Logger.getLogger("FilteredSearchRequestHelper");
+    
+    @Autowired
+    private ImageService imageService;
+
+    @Autowired
+    private LIReComponent lireService;
+    
+    @Autowired
+    private SearchRequestHelper searchRequestHelper;
+    
+    public byte[] getEmptyImageData(Map<String, String> multiParameter, String clusterMethod, int maxCountOrNull) {
+        return null;
+    }
+    
+    public byte[] getImageData(Map<String, String> multiParameter, String clusterMethod, Integer maxCountOrNull, HttpSession session) throws IOException {
+        Map<String, String> parameter = searchRequestHelper.convertParameterList(multiParameter);
+        ClusteringMethod method = ClusteringMethod.valueOf(clusterMethod);
+        if(method==null) throw new IllegalArgumentException("clustering method not implemented: " + clusterMethod);
+        List<PositionRetrievalImage> imageList = createFilteredImages(parameter, maxCountOrNull, clusterMethod);
+        logger.log(Level.INFO, "Got image list for clustering, loaded " + imageList.size() + " images. Start sorting and create buffer array.");
+        return searchRequestHelper.createPositionImages(imageList, method, session);
+    }
+    
+    private List<PositionRetrievalImage> createFilteredImages(Map<String, String> parameter, Integer maxCountOrNull, String clusterMethod) {
+        Query q = ParameterParser.getParameterQuery(parameter);
+        //take only those which actually have position data
+        q.addCriteria(where(ModelParser.GENERIC_CLUSTERING_DATA+clusterMethod).exists(true));
+        q.addCriteria(where(ModelParser.TEXTURE_ATLAS_ICON_ID).exists(true));
+        //limit results if a limit is given
+        if (maxCountOrNull != null) q.limit(maxCountOrNull);
+        return imageService.getAllFilteredImages(PositionRetrievalImage.class, q);
+    }
+
+}

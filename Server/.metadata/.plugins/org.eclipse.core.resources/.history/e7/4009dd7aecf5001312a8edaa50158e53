@@ -1,0 +1,370 @@
+package ch.fhnw.i4ds.campartex.controller;
+
+import java.io.IOException;
+import java.util.AbstractMap;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map.Entry;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+import javax.servlet.http.HttpServletResponse;
+
+import net.semanticmetadata.lire.clustering.CampartexKMeans;
+import net.semanticmetadata.lire.clustering.Cluster;
+
+import org.jfree.chart.ChartUtilities;
+import org.jfree.chart.JFreeChart;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.stereotype.Controller;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.ResponseBody;
+
+import ch.fhnw.i4ds.campartex.component.DBImageCreator;
+import ch.fhnw.i4ds.campartex.component.LIReComponent;
+import ch.fhnw.i4ds.campartex.component.analysis.HistogramPerDigit;
+import ch.fhnw.i4ds.campartex.component.analysis.MultipleHistogramChart;
+import ch.fhnw.i4ds.campartex.model.TextureAtlasImage;
+import ch.fhnw.i4ds.campartex.model.URLImage;
+import ch.fhnw.i4ds.campartex.model.retrieving.RGBFeatureRetrievalImage;
+import ch.fhnw.i4ds.campartex.service.DBService;
+import ch.fhnw.i4ds.campartex.service.ImageService;
+import ch.fhnw.i4ds.campartex.util.ClusteringMethod;
+import ch.fhnw.i4ds.campartex.util.ImageToFileWriter;
+import ch.fhnw.i4ds.campartex.util.ImageUtils;
+
+/**
+ * AdminController handles web requests for handling and administering images
+ * 
+ * @author schorta_m
+ */
+@Controller
+@RequestMapping("/admin")
+public class AdminController {
+
+    private static final Logger logger = Logger.getLogger("AdminController");
+
+    @Autowired
+    private ImageService imageService;
+
+    @Autowired
+    private DBImageCreator rgbImageCreator;
+
+    @Autowired
+    private LIReComponent lireService;
+
+    @Autowired
+    private DBService dbService;
+    
+    @Autowired
+    private IndexController indexController;
+    
+    @Autowired
+    private ProdController prodController;
+    
+    public final static int textureAtlasSize = 65536; //16384
+
+    /**
+     * only for testing purposes - returns a simple string example: http://host:8080/campartex/services/admin/hello
+     * 
+     * @return simple string
+     */
+    @ResponseBody
+    @RequestMapping(value = "/hello", method = RequestMethod.GET, produces = "text/plain")
+    public String hello() {
+        return "Hello World";
+    }
+
+    /**
+     * returns size of images in database, example: http://host:8080/campartex/services/admin/imagesSize
+     * 
+     * @return number of images in database
+     */
+    @ResponseBody
+    @RequestMapping(value = "/imagesSize", method = RequestMethod.GET, produces = "text/plain")
+    public String getNrOfImages() {
+        StringBuilder sb = new StringBuilder();
+        sb.append(dbService.getCollectionSize(URLImage.class));
+        return sb.toString();
+    }
+    
+    /**
+     * Updates the DB with the latest and missing images. THIS TAKES ABOUT A WEEK OR TWO!
+     * @param imageLocation
+     * @return
+     * @throws Exception
+     */
+    @ResponseBody
+    @RequestMapping(value = "/importMissingImages/", method = RequestMethod.GET, produces = "text/plain")
+    public String importMissingImages(@RequestParam(defaultValue="/data2/qkl/") String imageLocation) throws Exception {
+        logger.log(Level.INFO, "importing images from " + imageLocation + " and set thumbnails. ");
+        prodController.importImages(imageLocation);
+        logger.log(Level.INFO, "creating cedd features... ");
+        indexController.ceddindexdirect(true);
+        logger.log(Level.INFO, "setting rgb positions... ");
+        prodController.setRGBPositions();
+        logger.log(Level.INFO, "setting cedd positions... ");
+        prodController.setCEDDPositions();
+        logger.log(Level.INFO, "create new texture atlas... ");
+        createClusteredTextureAtlas();
+        logger.log(Level.INFO, "successfully imported missing images! ");
+        return "successfully imported missing images!";
+    }
+
+    /**
+     * Creates a 4096x4096 pixels textureAtlas representing 65'536 cluster centers.
+     * All images will then be assigned to one of those cluster centers and the x/y position will be stored
+     * Attention: This needs up to 2GB of memory
+     * 
+     * @return number of images in database
+     * @throws IOException 
+     */
+    @ResponseBody
+    @RequestMapping(value = "/createClusteredTextureAtlas", method = RequestMethod.GET, produces = "text/plain")
+    public String createClusteredTextureAtlas() throws IOException {
+        
+        //TODO WORK IN PROGRESS
+        
+        logger.log(Level.INFO, "Start getting all images");
+        
+        Query query = new Query();
+        List<TextureAtlasImage> imageList = imageService.getDefaultThumbnailAndFeatureImages(query);
+        
+        logger.log(Level.INFO, "got the list of images");
+        
+        
+        //Find the 16'384 most distinct images by creating 16'384 cluster centers
+        CampartexKMeans kmeans = new CampartexKMeans(textureAtlasSize);
+        for (TextureAtlasImage image : imageList) {
+            
+            //use the cedd feature vectors for the similarity clustering
+            ArrayList<double[]> features = new ArrayList<double[]>();
+            
+            double[] featureVector = image.getFeatureData();
+            if (featureVector != null) {
+                features.add(featureVector);
+                
+                kmeans.addImage(Integer.toString(image.getId()), features);
+            } else {
+                logger.log(Level.INFO, "Image has no CEDD feature vector!");
+            }
+        }
+
+        logger.log(Level.INFO, "loaded " + kmeans.getImages().size() + " CEDD feature vectors, starting clustering");
+        
+        
+        kmeans.init();
+        double previousError = Double.MAX_VALUE;
+        for (int i = 0; i < 50; i++) { //50
+            double error = kmeans.clusteringStep();
+            logger.log(Level.INFO, "clustering step " + i + " done. Error threshold:" + error);
+            
+            //re-random clusters which have no members
+            Boolean rerandomedCluster = false;
+            Cluster[] clusters = kmeans.getClusters();
+            for (Cluster cluster : clusters) {
+                if (cluster.getMembers().size() == 0) {
+                    kmeans.assignNewClusterMean(cluster);
+                    rerandomedCluster = true;
+                }
+            }
+            
+            if (!rerandomedCluster && Math.abs(previousError - error) <= 2) break;
+            previousError = error;
+        }
+
+        logger.log(Level.INFO, "clustering done, interprete");
+        
+        Cluster[] clusters = kmeans.getClusters();
+        kmeans = null;
+        
+        //Assign a texture to each of the 16'384 clusters (the one nearest to the cluster center),
+        //and assign the nearest cluster (i.e. the most similar image) to each image
+        HashMap<Cluster, Entry<Double, TextureAtlasImage>> clusterTextures = new HashMap<Cluster, Entry<Double, TextureAtlasImage>>(textureAtlasSize);
+        for (TextureAtlasImage image : imageList) {
+            double nearestDistanceToACluster = Double.MAX_VALUE;
+            
+            for (int clusterID = 0; clusterID < textureAtlasSize; clusterID++) {
+                Cluster cluster = clusters[clusterID];
+                //get the distance between the cluster center and the image (in CEDD)
+                double distance = cluster.getDistance(image.getFeatureData());
+                
+                //check whether this image's nearest cluster center might be the current one
+                if (distance < nearestDistanceToACluster) {
+                    image.setTextureAtlasIconID(clusterID);
+                    nearestDistanceToACluster = distance;
+                }
+                
+                Entry<Double, TextureAtlasImage> existingClusterTexture = clusterTextures.get(cluster);
+                //if no cluster center image exists or this one's nearer
+                if (existingClusterTexture == null || existingClusterTexture.getKey() > distance) {
+                    //assign the current image to the cluster
+                    clusterTextures.put(cluster, new AbstractMap.SimpleEntry<Double, TextureAtlasImage>(distance, image));
+                }
+                
+            }
+        }
+        
+        logger.log(Level.INFO, "assigned cluster textures, save images");
+        
+        //Save the cluster centers in the database
+        imageService.addClusterCenters(imageList);
+        imageList = null;
+        
+
+        logger.log(Level.INFO, "start creating the textureAtlas list");
+        
+        //create the texture atlas from those images
+        List<TextureAtlasImage> textureImageList = new ArrayList<TextureAtlasImage>();
+        for (int clusterID = 0; clusterID < textureAtlasSize; clusterID++) {
+            textureImageList.add(clusterTextures.get(clusters[clusterID]).getValue());
+        }
+        
+        logger.log(Level.INFO, "create texture atlas");
+        ImageUtils.createTextureAtlas(textureImageList, imageService);
+
+        logger.log(Level.INFO, "done with textureAtlas creation");
+        
+        return "textureAtlas and clusterings created";
+    }
+
+    /**
+     * creates {@link ch.fhnw.i4ds.campartex.model.RGBFeatureRetrievalImage RGBImages} from URL and stores them in DB - attention: this
+     * task may take a while! example:
+     * http://host:8080/campartex/services/admin/upload/?url=http://soleil.i4ds.ch/solarradio/qkl/2010/01/01/
+     * 
+     * @param url
+     *            URL to upload images from
+     * @return list of images
+     */
+    @ResponseBody
+    @RequestMapping(value = "/upload/", method = RequestMethod.GET, produces = "application/json")
+    public String uploadImages(@RequestParam("url") String url) {
+        logger.log(Level.INFO, "url: " + url);
+        try {
+            rgbImageCreator.createAndSaveHttpDBImages(url);
+            // lireService.createIndexer(images);
+            logger.log(Level.INFO, "successful");
+            return "Image creation was successful of path " + url;
+            // return "RGB Images created and Images indexed from " + url + "\n" + images;
+        } catch (Exception e) {
+            return "Could not upload images: " + e;
+        }
+    }
+
+    /**
+     * returns all images from database
+     * 
+     * @return list of all images
+     */
+    @ResponseBody
+    @RequestMapping(value = "/images", method = RequestMethod.GET, produces = "application/json")
+    public List<URLImage> getAllImages() {
+        return imageService.getAllImages(URLImage.class);
+    }
+    
+    /**
+     * returns all images from database
+     * 
+     * @return list of all images
+     */
+    @ResponseBody
+    @RequestMapping(value = "/rgbimages", method = RequestMethod.GET, produces = "application/json")
+    public List<RGBFeatureRetrievalImage> getAllRGBImages() {
+        return imageService.getAllImages(RGBFeatureRetrievalImage.class);
+    }
+    
+    @RequestMapping(value = "/ceddHistograms", method = RequestMethod.GET)
+    public void getCEDDHistograms(HttpServletResponse response) throws IOException, InstantiationException, IllegalAccessException {
+        response.setContentType("image/png");
+        double[][] matrix = lireService.getFeatureMatrix(ClusteringMethod.cedd);
+        HistogramPerDigit histogramPerDigit = new HistogramPerDigit(matrix);
+        int[][] data = histogramPerDigit.getHistograms();
+        JFreeChart chart = new MultipleHistogramChart("CEDD Position Histogram", data).getjFreeChart();
+        ChartUtilities.writeChartAsPNG(response.getOutputStream(), chart, 1000, 20000);
+        response.getOutputStream().close();
+    }
+
+    /**
+     * drops stated collection 
+     * example: http://host:8080/campartex/services/admin/drop/?class=ch.fhnw.i4ds.campartex.model.RGBImage
+     * 
+     * @param classToDrop
+     *            class to drop
+     * @return string of result and collection name
+     */
+    @ResponseBody
+    @RequestMapping(value = "/drop/", method = RequestMethod.GET, produces = "application/json")
+    public String dropCollection(@RequestParam("class") String classToDrop) {
+        logger.log(Level.INFO, "dropping class: " + classToDrop);
+        try {
+            String collectionName = dbService.dropCollection(Class.forName(classToDrop));
+            return "Dropped collection " + collectionName;
+        } catch (Exception e) {
+            return "Could not drop collection: " + e;
+        }
+    }
+
+    /**
+     * drops all entities in images collection.
+     * example: http://host:8080/campartex/services/admin/dropimages
+     * @return string of result and collection name
+     */
+    @ResponseBody
+    @RequestMapping(value = "/dropimages", method = RequestMethod.GET, produces = "application/json")
+    public String dropImageCollection() {
+        logger.log(Level.INFO, "dropping images.");
+        try {
+            String collectionName = dbService.dropCollection(URLImage.class);
+            return "Dropped collection " + collectionName;
+        } catch (Exception e) {
+            return "Could not drop collection: " + e;
+        }
+    }
+    
+    /**
+     * copying images at a certain location to another location 
+     * example:
+     * http://host:8080/campartex/services/admin/store/?url=testURL;destination=testDestinationURL
+     * @param url URL where original images are stored
+     * @param destination URL where images should be copied to
+     * @return string depending on result of operation
+     */
+    @ResponseBody
+    @RequestMapping(value = "/store/", method = RequestMethod.GET, produces = "application/json")
+    public String storeImages(@RequestParam("url") String url, @RequestParam("destination") String destination) {
+        logger.log(Level.INFO, "copy images in " + url + " to " + destination);
+        try {
+            ImageToFileWriter.writeImageFiles(url, destination);
+            logger.log(Level.INFO, "successful");
+            return "Image storage to path " + destination + " was successful. ";
+        } catch (Exception e) {
+            logger.log(Level.SEVERE, "unsuccessful image storage: " + e);
+            return "Could not store images: " + e;
+        }
+    }
+    
+    /**
+     * saves images at a certain path in database
+     * @param destination path where images are stored
+     * @return string depending on result of operation
+     */
+    @ResponseBody
+    @RequestMapping(value = "/saveStoredInDb/", method = RequestMethod.GET, produces = "application/json")
+    public String saveStoredImagesInDb(@RequestParam("path") String path) {
+        logger.log(Level.INFO, "save stored images in " + path + " in DB ");
+        try {
+            rgbImageCreator.createAndSaveLocalDBImages(path);
+            logger.log(Level.INFO, "successful");
+            return "Saved images in " + path + " in DB. ";
+        } catch (Exception e) {
+            logger.log(Level.SEVERE, "unsuccessful image save: " + e);
+            return "Could not save images: " + e;
+        }
+    }
+    
+}
