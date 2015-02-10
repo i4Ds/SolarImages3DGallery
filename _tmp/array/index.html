@@ -1,0 +1,57 @@
+<html>
+	<head>
+		<meta charset="utf-8">
+		<title>Kunstexploration 3D</title>
+		<style>
+			html, body {
+				width: 100%;
+				height: 100%;
+			}
+
+			body {
+				margin: 0;
+				overflow: hidden;
+			}
+		</style>
+	</head>
+	<body>
+		<script src="CocoonJSExtensions/CocoonJS.js"></script>
+		<script src="CocoonJSExtensions/CocoonJS_App.js"></script>
+		<script src="CocoonJSExtensions/CocoonJS_App_ForCocoonJS.js"></script>
+		<script type="text/javascript" src="js/quicksort.js"></script>
+		<script type="text/javascript" src="js/kdTree.js"></script>
+		<script>
+		var len = 200000;
+		
+		positions = new Float32Array( len * 3 );
+		
+		for (var x = 0; x < len; x++) {
+			positions[ x * 3 + 0 ] = (Math.random() * 2 - 1);
+			positions[ x * 3 + 1 ] = (Math.random() * 2 - 1);
+			positions[ x * 3 + 2 ] = (Math.random() * 2 - 1);
+		}
+		quickSortIP(positions, 3, 1);
+		
+		//test
+		var condition = true;
+		for (var x = 0; x < 2000; x++) {
+			if (isNaN(positions[x]) || positions[x * 3+1] > positions[(x+1) * 3+1]) {
+				condition = false;
+				console.log('break at', x);
+				break;
+			}
+		}
+		console.log('Sort is ' + (condition ? 'correct' : 'wrong'));
+		
+		var distanceFunction = function(a, b){
+			return Math.pow(a[0] - b[0], 2) +  Math.pow(a[1] - b[1], 2) +  Math.pow(a[2] - b[2], 2);
+		};
+		
+		measureStart = new Date().getTime();
+		var kdtree = new kdTree( positions, distanceFunction, 3 );
+		console.log('TIME building kdtree ', new Date().getTime() - measureStart);
+		
+		var imagePositionsInRange = kdtree.nearest([0,0,0], 1000, 1000);
+		</script>
+	</body>
+</html>
